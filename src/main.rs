@@ -16,7 +16,9 @@ const DEFAULT_PROJECT: &str = "globalcomix";
 const DEFAULT_CONFIG_URI: &str =
     "gs://us-central1-gc-composer-02600f88-bucket/dags/sync_gc_db/sync_config.json";
 const COMPOSER_API: &str = "https://composer.googleapis.com/v1";
+const COMPOSER_API_ENV: &str = "GAIRFLOW_COMPOSER_API_BASE_URL";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const TOKEN_URL_ENV: &str = "GAIRFLOW_TOKEN_URL";
 
 #[derive(Parser)]
 #[command(name = "gairflow")]
@@ -157,8 +159,13 @@ struct RawArgs {
     args: Vec<OsString>,
 }
 
+#[cfg(not(test))]
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    dispatch(&cli)
+}
+
+fn dispatch(cli: &Cli) -> Result<()> {
     match &cli.command {
         Commands::Schedules(args) => schedules(&cli, args),
         Commands::NextRun(args) => next_run(&cli, args),
@@ -390,8 +397,11 @@ impl AirflowApi {
 
 fn discover_airflow_url(client: &Client, token: &str, cli: &Cli) -> Result<String> {
     let url = format!(
-        "{COMPOSER_API}/projects/{}/locations/{}/environments/{}",
-        cli.project, cli.location, cli.environment
+        "{}/projects/{}/locations/{}/environments/{}",
+        composer_api_base_url().trim_end_matches('/'),
+        cli.project,
+        cli.location,
+        cli.environment
     );
     let environment = client
         .get(&url)
@@ -404,6 +414,10 @@ fn discover_airflow_url(client: &Client, token: &str, cli: &Cli) -> Result<Strin
         .and_then(|value| value.as_str())
         .map(ToOwned::to_owned)
         .context("Composer environment response did not include config.airflowUri")
+}
+
+fn composer_api_base_url() -> String {
+    std::env::var(COMPOSER_API_ENV).unwrap_or_else(|_| COMPOSER_API.to_string())
 }
 
 #[derive(Deserialize)]
@@ -436,7 +450,7 @@ fn load_access_token(client: &Client) -> Result<String> {
     }
 
     let response = client
-        .post(TOKEN_URL)
+        .post(token_url())
         .form(&[
             ("client_id", adc.client_id.as_str()),
             ("client_secret", adc.client_secret.as_str()),
@@ -449,6 +463,10 @@ fn load_access_token(client: &Client) -> Result<String> {
     let token: TokenResponse =
         serde_json::from_value(token).context("OAuth token refresh response was malformed")?;
     Ok(token.access_token)
+}
+
+fn token_url() -> String {
+    std::env::var(TOKEN_URL_ENV).unwrap_or_else(|_| TOKEN_URL.to_string())
 }
 
 fn read_adc_credentials() -> Result<AdcCredentials> {
@@ -677,9 +695,13 @@ fn config_check(uri: &str) -> Result<()> {
     }
     let config: serde_json::Value =
         serde_json::from_slice(&output.stdout).context("live config is not valid JSON")?;
-    let include_tables = array_of_strings(&config, "include_tables");
-    let expected_skip_tables = array_of_strings(&config, "expected_skip_tables");
-    let bootstrap_acknowledged = array_of_strings(&config, "bootstrap_acknowledged");
+    check_config_state(&config)
+}
+
+fn check_config_state(config: &serde_json::Value) -> Result<()> {
+    let include_tables = array_of_strings(config, "include_tables");
+    let expected_skip_tables = array_of_strings(config, "expected_skip_tables");
+    let bootstrap_acknowledged = array_of_strings(config, "bootstrap_acknowledged");
 
     let mut ok = true;
     for table in ["income", "income_content_summary", "utms"] {
@@ -722,3 +744,6 @@ fn exit_from_status(status: std::process::ExitStatus) -> Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
 }
+
+#[cfg(test)]
+mod tests;
